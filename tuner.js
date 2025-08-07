@@ -9,6 +9,7 @@ document.addEventListener('DOMContentLoaded', () => {
     const headstockLeftEl = document.getElementById('headstock-left');
     const headstockRightEl = document.getElementById('headstock-right');
     const micToggleEl = document.getElementById('mic-toggle');
+    const tunerErrorEl = document.getElementById('tuner-error'); // Added for error display
 
     // Audio & Tuner State
     let audioContext, analyser, dataArray, mediaStreamSource;
@@ -86,32 +87,55 @@ document.addEventListener('DOMContentLoaded', () => {
             else this.stopListening();
         },
 
-        startListening() {
+        async startListening() {
             if (isListening) return;
-            audioContext = new (window.AudioContext || window.webkitAudioContext)();
-            analyser = audioContext.createAnalyser();
-            analyser.fftSize = 8192;
-            dataArray = new Float32Array(analyser.frequencyBinCount);
-    
-            navigator.mediaDevices.getUserMedia({ audio: { echoCancellation: false, autoGainControl: false, noiseSuppression: false } })
-                .then(stream => {
-                    isListening = true;
-                    mediaStreamSource = audioContext.createMediaStreamSource(stream);
-                    mediaStreamSource.connect(analyser);
-                    this.updatePitch();
-                })
-                .catch(err => {
-                    console.error('Error accessing microphone:', err);
-                    alert('Error al acceder al micrófono. Por favor, permite el acceso.');
+            tunerErrorEl.textContent = ''; // Clear previous errors
+
+            // 1. Create or resume AudioContext on user interaction
+            if (!audioContext) {
+                try {
+                    audioContext = new (window.AudioContext || window.webkitAudioContext)();
+                    analyser = audioContext.createAnalyser();
+                    analyser.fftSize = 8192;
+                    dataArray = new Float32Array(analyser.frequencyBinCount);
+                } catch (e) {
+                    console.error("Could not create AudioContext:", e);
+                    tunerErrorEl.textContent = 'Error: Web Audio API is not supported by this browser.';
                     micToggleEl.checked = false;
-                });
+                    return;
+                }
+            }
+
+            if (audioContext.state === 'suspended') {
+                await audioContext.resume();
+            }
+
+            // 2. Get user media
+            try {
+                const stream = await navigator.mediaDevices.getUserMedia({ audio: { echoCancellation: false, autoGainControl: false, noiseSuppression: false } });
+                isListening = true;
+                mediaStreamSource = audioContext.createMediaStreamSource(stream);
+                mediaStreamSource.connect(analyser);
+                this.updatePitch();
+            } catch (err) {
+                console.error('Error accessing microphone:', err);
+                tunerErrorEl.textContent = 'Error al acceder al micrófono. Por favor, permite el acceso.';
+                micToggleEl.checked = false;
+                isListening = false;
+                if (audioContext.state !== 'closed') {
+                    audioContext.close();
+                }
+                audioContext = null; // Reset context
+            }
         },
     
         stopListening() {
             if (!isListening || !mediaStreamSource) return;
             cancelAnimationFrame(animationFrameId);
             mediaStreamSource.mediaStream.getTracks().forEach(track => track.stop());
-            audioContext.close();
+            if (audioContext && audioContext.state !== 'closed') {
+                audioContext.suspend(); // Suspend instead of close to reuse it
+            }
             isListening = false;
             this.resetUI();
         },
@@ -134,6 +158,7 @@ document.addEventListener('DOMContentLoaded', () => {
         },
 
         updatePitch() {
+            if (!isListening) return;
             analyser.getFloatTimeDomainData(dataArray);
             const pitch = this.getPitch(dataArray, audioContext.sampleRate);
     
